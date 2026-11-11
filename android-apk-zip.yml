@@ -1,0 +1,93 @@
+# Gera o APK do Pregador+ a partir do ZIP enviado na raiz do repositório.
+# Uso: envie "pregador-vX.Y-apk.zip" + este arquivo em .github/workflows/. Não precisa extrair nada.
+name: Gerar APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extrair o ZIP do app (usa o de maior versão)
+        working-directory: ${{ github.workspace }}
+        run: |
+          ZIP=$(ls -1 pregador-*.zip 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$ZIP" ]; then echo "::error::Envie o arquivo pregador-vX.Y-apk.zip para a raiz do repositório."; exit 1; fi
+          echo "Usando $ZIP"
+          mkdir app
+          unzip -q "$ZIP" -d app
+          # se o zip veio com uma pasta dentro, sobe um nível
+          if [ ! -f app/package.json ]; then D=$(dirname "$(find app -maxdepth 3 -name package.json | head -n1)"); mv "$D"/* "$D"/.[!.]* app/ 2>/dev/null || true; fi
+          ls -la app | head -30
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Instalar dependências
+        run: npm install --no-audit --no-fund
+
+      - name: Verificações do app
+        run: npm test
+
+      - name: Montar a pasta www
+        run: npm run build:www
+
+      - name: Criar o projeto Android
+        run: npx cap add android
+
+      - name: Ajustar Android (permissões, versão, ícones)
+        run: |
+          pip install --quiet pillow
+          VERSION=$(node -p "require('./package.json').version")
+          python3 scripts/android-setup.py "${{ github.run_number }}" "$VERSION"
+
+      - name: Sincronizar plugins
+        run: npx cap sync android
+
+      - name: Usar a chave de assinatura fixa
+        run: |
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
+
+      - name: Compilar o APK
+        working-directory: app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Renomear o APK
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          cp android/app/build/outputs/apk/debug/app-debug.apk "Pregador-Plus-${VERSION}-build${{ github.run_number }}.apk"
+          ls -la *.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pregador-plus-apk
+          path: app/Pregador-Plus-*.apk
+
+      - name: Publicar em Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Pregador+ build ${{ github.run_number }}
+          body: "APK do Pregador+ (build ${{ github.run_number }})."
+          files: app/Pregador-Plus-*.apk
